@@ -3,11 +3,8 @@ lflags = -lglfw -lvulkan
 cflags = -O2
 dflags = '' # by default not set
 
-build/anyspace: dirCreate src/main.c build/frag.spv build/vert.spv | dirCreate
+build/anyspace: src/main.c build/frag.spv build/vert.spv
 	$(cc) src/main.c -o build/anyspace $(lflags) $(cflags) $(dflags)
-
-dirCreate:
-	mkdir -p build
 
 build/vert.spv: src/vert.vert
 	glslc src/vert.vert -o build/vert.spv
