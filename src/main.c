@@ -12,6 +12,43 @@
 #define VkApi VK_API_VERSION_1_4
 #endif
 
+typedef struct AnsConfig{
+    int WinWidth;
+    int WinHeight;
+    uint32_t VkVersion;
+    VkPresentModeKHR vsync;
+} AnsConfig;
+
+AnsConfig ansGetConfig(char* filename){
+    AnsConfig config = {0};
+    FILE *fp = fopen(filename, "r");
+    if (!fp) return config; // width = 0 -> error
+
+    char str[32];
+    while (fgets(str, 32, fp)){
+        if (str[6] == 'W') // recognise strings by key symbols
+            config.WinWidth = atoi(str + 13);
+        else if (str[6] == 'H')
+            config.WinHeight = atoi(str + 13);
+        else if (str[1] == 'u'){
+            if (str[18] == '0') config.VkVersion = VK_API_VERSION_1_0;
+            else if (str[18] == '1') config.VkVersion = VK_API_VERSION_1_1;
+            else if (str[18] == '2') config.VkVersion = VK_API_VERSION_1_2;
+            else if (str[18] == '3') config.VkVersion = VK_API_VERSION_1_3;
+            else config.VkVersion = VK_API_VERSION_1_4;
+        }
+        else {
+            if (str[12] == 'f') config.vsync = VK_PRESENT_MODE_FIFO_KHR;
+            else if (str[12] == 'm') config.vsync = VK_PRESENT_MODE_MAILBOX_KHR;
+            else config.VkVersion = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+    }
+    if (!config.WinHeight || !config.VkVersion)
+        config.WinWidth = 0;
+    fclose(fp);
+    return config;
+}
+
 VkShaderModule ansCreateShader(char* filename, VkDevice dev){
     FILE *shaderFp = fopen(filename, "rb");
     if (!shaderFp) return NULL;
@@ -37,6 +74,13 @@ VkShaderModule ansCreateShader(char* filename, VkDevice dev){
 }
 
 int main(void){
+    AnsConfig ansCfg = ansGetConfig("config.cfg");
+    if (ansCfg.WinWidth){
+        fputs("[Error] Invalid or mising config file\n", stderr);
+        return 6;
+    }
+    printf("%d %d %u %u\n", ansCfg.WinWidth, ansCfg.WinHeight, ansCfg.VkVersion, ansCfg.vsync);
+
     int exitCode = glfwInit();
     if (!exitCode){
         fputs("[Error] glfwInit", stderr);
