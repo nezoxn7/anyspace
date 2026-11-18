@@ -5,12 +5,7 @@
 #include <stdio.h>
 
 #define MAX_FRAMES_IN_FLIGHT 2U
-
-#ifdef oldVkApi
-#define VkApi VK_API_VERSION_1_1
-#else
-#define VkApi VK_API_VERSION_1_4
-#endif
+#define CFG_MAX_STR_LEN 32
 
 typedef struct AnsConfig{
     int WinWidth;
@@ -24,12 +19,13 @@ AnsConfig ansGetConfig(char* filename){
     FILE *fp = fopen(filename, "r");
     if (!fp) return config; // width = 0 -> error
 
-    char str[32];
-    while (fgets(str, 32, fp)){
+    char str[CFG_MAX_STR_LEN] = {0};
+    while (fgets(str, CFG_MAX_STR_LEN, fp)){
+        if (str[0] == '#') continue;
         if (str[6] == 'W') // recognise strings by key symbols
-            config.WinWidth = atoi(str + 13);
+            config.WinWidth = atoi(str + 14);
         else if (str[6] == 'H')
-            config.WinHeight = atoi(str + 13);
+            config.WinHeight = atoi(str + 15);
         else if (str[1] == 'u'){
             if (str[18] == '0') config.VkVersion = VK_API_VERSION_1_0;
             else if (str[18] == '1') config.VkVersion = VK_API_VERSION_1_1;
@@ -40,7 +36,7 @@ AnsConfig ansGetConfig(char* filename){
         else {
             if (str[12] == 'f') config.vsync = VK_PRESENT_MODE_FIFO_KHR;
             else if (str[12] == 'm') config.vsync = VK_PRESENT_MODE_MAILBOX_KHR;
-            else config.VkVersion = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            else config.vsync = VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
     }
     if (!config.WinHeight || !config.VkVersion)
@@ -75,12 +71,12 @@ VkShaderModule ansCreateShader(char* filename, VkDevice dev){
 
 int main(void){
     AnsConfig ansCfg = ansGetConfig("config.cfg");
-    if (ansCfg.WinWidth){
+    //printf("%d %d %u %u\n", ansCfg.WinWidth, ansCfg.WinHeight, ansCfg.VkVersion, ansCfg.vsync);
+    if (!ansCfg.WinWidth){
         fputs("[Error] Invalid or mising config file\n", stderr);
         return 6;
     }
-    printf("%d %d %u %u\n", ansCfg.WinWidth, ansCfg.WinHeight, ansCfg.VkVersion, ansCfg.vsync);
-
+    
     int exitCode = glfwInit();
     if (!exitCode){
         fputs("[Error] glfwInit", stderr);
@@ -89,7 +85,7 @@ int main(void){
     exitCode = 0;
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    GLFWwindow* window = glfwCreateWindow(800, 600, "AnySpace Engine Demo", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(ansCfg.WinWidth, ansCfg.WinHeight, "AnySpace Engine Demo", NULL, NULL);
 
     uint32_t countExt;
     const char** VkExtns = glfwGetRequiredInstanceExtensions(&countExt);
@@ -101,7 +97,7 @@ int main(void){
         appInfo.applicationVersion = VK_MAKE_VERSION(0, 0, 1);
         appInfo.pEngineName = "AnySpace";
         appInfo.engineVersion = VK_MAKE_VERSION(0, 0, 1);
-        appInfo.apiVersion = VkApi;
+        appInfo.apiVersion = ansCfg.VkVersion;
 
     VkInstanceCreateInfo createInfo = {0};
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -272,7 +268,7 @@ int main(void){
         else
             sChainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    #ifdef useVsync
+    #ifdef oldVsyncCode
         VkPresentModeKHR presMode = VK_PRESENT_MODE_FIFO_KHR; // default vsync
         uint32_t presModeCount;
         result = vkGetPhysicalDeviceSurfacePresentModesKHR(physDev, surface, &presModeCount, NULL);
@@ -293,7 +289,7 @@ int main(void){
         sChainInfo.presentMode = presMode;
         free(presModes);
     #else
-        sChainInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR; // no vsync
+        sChainInfo.presentMode = ansCfg.vsync;
     #endif
 
     if (sCap.currentExtent.width != UINT32_MAX) {

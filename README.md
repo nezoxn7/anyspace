@@ -18,10 +18,15 @@ Currently only the foundation is ready — a triangle. Everything else is a work
 
 ### Building
 ```bash
+./build.sh
+
+# Compile code patch (if build.sh was runned previously)
 make
-cd build && ./anyspace
-# or in one command:
+
+# Run
 make test
+# or
+cd build && ./anyspace
 ```
 
 ### I write the code myself
@@ -55,10 +60,15 @@ AI is used rationally, with my full control over every change.
 
 ### Сборка
 ```bash
+./build.sh
+
+# Скомплировать патч кода (если build.sh исполнялся ранее)
 make
-cd build && ./anyspace
-# Или одной командой:
+
+# Запустить
 make test
+# или
+cd build && ./anyspace
 ```
 
 ### Код я пишу сам
