@@ -1,7 +1,7 @@
 cc = clang
 lflags = -lglfw -lvulkan
 cflags = -O2
-dflags = '' # by default not set
+dflags = -DMULTI_GPU
 
 build/anyspace: src/main.c build/frag.spv build/vert.spv
 	$(cc) src/main.c -o build/anyspace $(lflags) $(cflags) $(dflags)

@@ -7,12 +7,197 @@
 #define MAX_FRAMES_IN_FLIGHT 2U
 #define CFG_MAX_STR_LEN 32
 
+typedef struct LibsData{
+    GLFWwindow* win; VkInstance instance; VkSurfaceKHR surface;
+    VkPhysicalDevice physDev; VkDevice dev;
+    uint32_t countUniqueQueues; uint32_t queueFamiliesId[2];
+    VkQueue gfxQueue; VkQueue presQueue;
+    VkSurfaceCapabilitiesKHR surfCap;
+    VkSurfaceFormatKHR surfFormat;
+} LibsData;
+
 typedef struct AnsConfig{
     int WinWidth;
     int WinHeight;
     uint32_t VkVersion;
-    VkPresentModeKHR vsync;
+    int GpuId;
+    VkPresentModeKHR Vsync;
 } AnsConfig;
+
+int AnsMkWinInstSurf(LibsData *ld, AnsConfig *ansCfg){
+    int exitCode = glfwInit();
+    if (!exitCode){
+        fputs("[Error] glfwInit", stderr);
+        return 9;
+    }
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    ld->win = glfwCreateWindow(ansCfg->WinWidth, ansCfg->WinHeight, "AnySpace Engine Demo", NULL, NULL);
+
+    uint32_t countExt;
+    const char** VkExtns = glfwGetRequiredInstanceExtensions(&countExt);
+
+    VkResult result;
+    VkApplicationInfo appInfo = {0};
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        appInfo.pApplicationName = "Early development demo";
+        appInfo.applicationVersion = VK_MAKE_VERSION(0, 0, 1);
+        appInfo.pEngineName = "AnySpace";
+        appInfo.engineVersion = VK_MAKE_VERSION(0, 0, 1);
+        appInfo.apiVersion = ansCfg->VkVersion;
+
+    VkInstanceCreateInfo createInfo = {0};
+        createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        createInfo.pApplicationInfo = &appInfo;
+        createInfo.enabledExtensionCount = countExt;
+        createInfo.ppEnabledExtensionNames = VkExtns;
+
+    result = vkCreateInstance(&createInfo, NULL, &ld->instance);
+    if (result){
+        fputs("[Error] CreateInstance\n", stderr);
+        return 20; }
+
+    result = glfwCreateWindowSurface(ld->instance, ld->win, NULL, &ld->surface);
+    if (result){
+        fputs("[Error] CreateWindowSurface\n", stderr);
+        return 25; }
+    return 0;
+}
+
+int AnsDevInit(LibsData *ld, int GpuId){
+    #ifdef MULTI_GPU
+    uint32_t devCount;
+    VkResult result = vkEnumeratePhysicalDevices(ld->instance, &devCount, NULL);
+    if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || !devCount) {
+        fprintf(stderr, "[Error] EnumeratePhysicalDevices\n");
+        return 4;
+    }
+    VkPhysicalDevice *devices = malloc(devCount * sizeof(VkPhysicalDevice));
+    result = vkEnumeratePhysicalDevices(ld->instance, &devCount, devices);
+    if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || !devices) {
+        free(devices);
+        fprintf(stderr, "[Error] EnumeratePhysicalDevices + malloc\n");
+        return 4;
+    }
+    ld->physDev = devices[GpuId];
+    free(devices);
+#else
+    uint32_t devCount = 1;
+    VkResult result = vkEnumeratePhysicalDevices(ld->instance, &devCount, &ld->physDev);
+    if (result){
+        fputs("[Error] EnumeratePhysicalDevices\n", stderr);
+        return 3;
+    }
+#endif
+    uint32_t queueFamilyCount;
+    vkGetPhysicalDeviceQueueFamilyProperties(ld->physDev, &queueFamilyCount, NULL);
+    VkQueueFamilyProperties *queueFamilies = malloc(queueFamilyCount * sizeof(VkQueueFamilyProperties));
+    vkGetPhysicalDeviceQueueFamilyProperties(ld->physDev, &queueFamilyCount, queueFamilies);
+
+    // 0 - gfx, 1 - pres
+    ld->queueFamiliesId[0] = UINT32_MAX; ld->queueFamiliesId[1] = UINT32_MAX; 
+    for (uint32_t i = 0; i < queueFamilyCount; i++) {
+        VkQueueFamilyProperties queueFamily = queueFamilies[i];
+        VkBool32 presentSuppuort;
+        result = vkGetPhysicalDeviceSurfaceSupportKHR(ld->physDev, i, ld->surface, &presentSuppuort);
+        if (result){
+            fputs("[Error] GetPhysicalDeviceSurfaceSupport\n", stderr);
+            free(queueFamilies);
+            return 11;
+        }
+        if (presentSuppuort)
+            ld->queueFamiliesId[1] = i;
+        if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT)
+            ld->queueFamiliesId[0] = i;
+    }
+    
+    free(queueFamilies);
+
+    ld->countUniqueQueues = 2;
+    if (ld->queueFamiliesId[0] == ld->queueFamiliesId[1]){
+        ld->countUniqueQueues = 1;
+        if (ld->queueFamiliesId[0] == UINT32_MAX){
+            fputs("[Error] Queue not found\n", stderr);
+            return 8;
+        }
+    }
+
+    VkPhysicalDeviceFeatures devFeatures = {0};
+    const float queuePriority = 1.0f;
+
+    VkDeviceQueueCreateInfo *queueInfos = calloc(ld->countUniqueQueues ,sizeof(VkDeviceQueueCreateInfo));
+        queueInfos[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueInfos[0].queueCount = 1;
+        queueInfos[0].queueFamilyIndex = ld->queueFamiliesId[0];
+        queueInfos[0].pQueuePriorities = &queuePriority;
+    if (ld->countUniqueQueues == 2){
+        queueInfos[1].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueInfos[1].queueCount = 1;
+        queueInfos[1].queueFamilyIndex = ld->queueFamiliesId[1];
+        queueInfos[1].pQueuePriorities = &queuePriority; }
+
+    const char* devExt[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
+    VkDeviceCreateInfo devInfo = {0};
+        devInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        devInfo.enabledExtensionCount = 1;
+        devInfo.ppEnabledExtensionNames = devExt;
+        devInfo.pEnabledFeatures = &devFeatures;
+        devInfo.queueCreateInfoCount = ld->countUniqueQueues;
+        devInfo.pQueueCreateInfos = queueInfos;
+
+    result = vkCreateDevice(ld->physDev, &devInfo, NULL, &ld->dev);
+
+    free(queueInfos);
+    
+    if (result){
+        fputs("Error at creating logical device\n", stderr);
+        return 7;
+    }
+    
+    vkGetDeviceQueue(ld->dev, ld->queueFamiliesId[0], 0, &ld->gfxQueue);
+    vkGetDeviceQueue(ld->dev, ld->queueFamiliesId[1], 0, &ld->presQueue);
+    return 0;
+}
+int ansSurfaceInit(LibsData *ld){
+    VkResult result;
+#ifdef dontCheckFormats
+    ld->surfFormat.format = VK_FORMAT_B8G8R8A8_SRGB;
+    ld->surfFormat.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+#else
+    uint32_t formatsCount;
+    result = vkGetPhysicalDeviceSurfaceFormatsKHR(ld->physDev, ld->surface, &formatsCount, NULL);
+    if (result){
+        fputs("[Error] GetPhysicalDeviceSurfaceFormats\n", stderr);
+        return 1;
+    }
+    VkSurfaceFormatKHR *sFormats = malloc(formatsCount * sizeof(VkSurfaceFormatKHR));
+    result = vkGetPhysicalDeviceSurfaceFormatsKHR(ld->physDev, ld->surface, &formatsCount, sFormats);
+    if (result|| !sFormats){
+        fputs("Device dont support image format (1)\n", stderr);
+        return 1;
+    }
+    char notfound = 1;
+    for (uint32_t i = 0; i < formatsCount; i++) 
+        if (sFormats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && sFormats[i].format == VK_FORMAT_B8G8R8A8_SRGB){
+            ld->surfFormat = sFormats[i];
+            notfound = 0;
+            break;
+        }
+    free(sFormats);
+    if (notfound) {
+        fputs("Device dont support image format (2)\n", stderr);
+        return 1;
+    }
+#endif
+    
+    result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ld->physDev, ld->surface, &ld->surfCap);
+    if (result){
+        fputs("[Error] GetPhysicalDeviceSurfaceCapabilities\n", stderr);
+        return 19;
+    }
+    return 0;
+}
 
 AnsConfig ansGetConfig(char* filename){
     AnsConfig config = {0};
@@ -33,10 +218,12 @@ AnsConfig ansGetConfig(char* filename){
             else if (str[18] == '3') config.VkVersion = VK_API_VERSION_1_3;
             else config.VkVersion = VK_API_VERSION_1_4;
         }
+        else if (str[0] == 'G')
+            config.GpuId = atoi(str + 8);
         else {
-            if (str[12] == 'f') config.vsync = VK_PRESENT_MODE_FIFO_KHR;
-            else if (str[12] == 'm') config.vsync = VK_PRESENT_MODE_MAILBOX_KHR;
-            else config.vsync = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            if (str[12] == 'f') config.Vsync = VK_PRESENT_MODE_FIFO_KHR;
+            else if (str[12] == 'm') config.Vsync = VK_PRESENT_MODE_MAILBOX_KHR;
+            else config.Vsync = VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
     }
     if (!config.WinHeight || !config.VkVersion)
@@ -70,200 +257,37 @@ VkShaderModule ansCreateShader(char* filename, VkDevice dev){
 }
 
 int main(void){
+    VkResult result;
+    LibsData *ld = calloc(sizeof(LibsData), 1U);
     AnsConfig ansCfg = ansGetConfig("config.cfg");
-    //printf("%d %d %u %u\n", ansCfg.WinWidth, ansCfg.WinHeight, ansCfg.VkVersion, ansCfg.vsync);
+    
+    //printf("%u\n", ld->countUniqueQueues);
     if (!ansCfg.WinWidth){
         fputs("[Error] Invalid or mising config file\n", stderr);
         return 6;
     }
+
+    int exitCode = AnsMkWinInstSurf(ld, &ansCfg);
+    if (exitCode) return exitCode;
+
+    exitCode = AnsDevInit(ld, ansCfg.GpuId);
+    if (exitCode) return exitCode;
+
+    exitCode = ansSurfaceInit(ld);
+    if (exitCode) return exitCode;
     
-    int exitCode = glfwInit();
-    if (!exitCode){
-        fputs("[Error] glfwInit", stderr);
-        return 9;
-    }
-    exitCode = 0;
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    GLFWwindow* window = glfwCreateWindow(ansCfg.WinWidth, ansCfg.WinHeight, "AnySpace Engine Demo", NULL, NULL);
-
-    uint32_t countExt;
-    const char** VkExtns = glfwGetRequiredInstanceExtensions(&countExt);
-
-    VkResult result;
-    VkApplicationInfo appInfo = {0};
-        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        appInfo.pApplicationName = "Early development demo";
-        appInfo.applicationVersion = VK_MAKE_VERSION(0, 0, 1);
-        appInfo.pEngineName = "AnySpace";
-        appInfo.engineVersion = VK_MAKE_VERSION(0, 0, 1);
-        appInfo.apiVersion = ansCfg.VkVersion;
-
-    VkInstanceCreateInfo createInfo = {0};
-        createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-        createInfo.pApplicationInfo = &appInfo;
-        createInfo.enabledExtensionCount = countExt;
-        createInfo.ppEnabledExtensionNames = VkExtns;
-
-    VkInstance instance = {0};
-    result = vkCreateInstance(&createInfo, NULL, &instance);
-    if (result){
-        fputs("[Error] CreateInstance\n", stderr);
-        return 20; }
-
-    VkSurfaceKHR surface;
-    result = glfwCreateWindowSurface(instance, window, NULL, &surface);
-    if (result){
-        fputs("[Error] CreateWindowSurface\n", stderr);
-        return 25; }
-
-#ifdef multiGpu
-    uint32_t devCount;
-    result = vkEnumeratePhysicalDevices(instance, &devCount, NULL);
-    if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || !devCount) {
-        fprintf(stderr, "Error at getting devices count\n");
-        return 4;
-    }
-    VkPhysicalDevice *devices = malloc(devCount * sizeof(VkPhysicalDevice));
-    result = vkEnumeratePhysicalDevices(instance, &devCount, devices);
-    if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || !devices) {
-        free(devices);
-        fprintf(stderr, "Error at getting devices\n");
-        return 3;
-    }
-    VkPhysicalDevice physDev = devices[0]; // curently only one gpu
-    free(devices);
-#else
-    uint32_t devCount = 1;
-    VkPhysicalDevice physDev;
-    result = vkEnumeratePhysicalDevices(instance, &devCount, &physDev);
-    if (result){
-        fputs("[Error] EnumeratePhysicalDevices\n", stderr);
-        return 3;
-    }
-#endif
-    uint32_t queueFamilyCount;
-    vkGetPhysicalDeviceQueueFamilyProperties(physDev, &queueFamilyCount, NULL);
-    VkQueueFamilyProperties *queueFamilies = malloc(queueFamilyCount * sizeof(VkQueueFamilyProperties));
-    vkGetPhysicalDeviceQueueFamilyProperties(physDev, &queueFamilyCount, queueFamilies);
-
-    uint32_t queueFamiliesId[] = {UINT32_MAX, UINT32_MAX}; // 0 - gfx, 1 - pres
-    for (uint32_t i = 0; i < queueFamilyCount; i++) {
-        VkQueueFamilyProperties queueFamily = queueFamilies[i];
-
-        VkBool32 presentSuppuort;
-        result = vkGetPhysicalDeviceSurfaceSupportKHR(physDev, i, surface, &presentSuppuort);
-        if (result){
-            fputs("[Error] GetPhysicalDeviceSurfaceSupport\n", stderr);
-            free(queueFamilies);
-            return 11;
-        }
-        if (presentSuppuort)
-            queueFamiliesId[1] = i;
-
-        if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT)
-            queueFamiliesId[0] = i;
-    }
-    
-    free(queueFamilies);
-
-    uint32_t countUniqueQueues = 2;
-    if (queueFamiliesId[0] == queueFamiliesId[1]){
-        countUniqueQueues = 1;
-        if (queueFamiliesId[0] == UINT32_MAX){
-            fputs("[Error] Queue not found\n", stderr);
-            return 8;
-        }
-    }
-
-    VkPhysicalDeviceFeatures devFeatures = {0};
-    const float queuePriority = 1.0f;
-
-    VkDeviceQueueCreateInfo *queueInfos = calloc(countUniqueQueues ,sizeof(VkDeviceQueueCreateInfo));
-        queueInfos[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queueInfos[0].queueCount = 1;
-        queueInfos[0].queueFamilyIndex = queueFamiliesId[0];
-        queueInfos[0].pQueuePriorities = &queuePriority;
-    if (countUniqueQueues == 2){
-        queueInfos[1].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queueInfos[1].queueCount = 1;
-        queueInfos[1].queueFamilyIndex = queueFamiliesId[1];
-        queueInfos[1].pQueuePriorities = &queuePriority; }
-
-    const char* devExt[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-
-    VkDeviceCreateInfo devInfo = {0};
-        devInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        devInfo.enabledExtensionCount = 1;
-        devInfo.ppEnabledExtensionNames = devExt;
-        devInfo.pEnabledFeatures = &devFeatures;
-        devInfo.queueCreateInfoCount = countUniqueQueues;
-        devInfo.pQueueCreateInfos = queueInfos;
-
-    VkDevice dev;
-    result = vkCreateDevice(physDev, &devInfo, NULL, &dev);
-
-    free(queueInfos);
-    
-    if (result){
-        fputs("Error at creating logical device\n", stderr);
-        return 7;
-    }
-
-    VkQueue gfxQueue; VkQueue presQueue;
-    vkGetDeviceQueue(dev, queueFamiliesId[0], 0, &gfxQueue);
-    vkGetDeviceQueue(dev, queueFamiliesId[1], 0, &presQueue);
-
-    VkSurfaceFormatKHR sFormat = {0};
-#ifdef dontCheckFormats
-    sFormat.format = VK_FORMAT_B8G8R8A8_SRGB;
-    sFormat.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-#else
-    uint32_t formatsCount;
-    result = vkGetPhysicalDeviceSurfaceFormatsKHR(physDev, surface, &formatsCount, NULL);
-    if (result){
-        fputs("[Error] GetPhysicalDeviceSurfaceFormats\n", stderr);
-        return 1;
-    }
-    VkSurfaceFormatKHR *sFormats = malloc(formatsCount * sizeof(VkSurfaceFormatKHR));
-    result = vkGetPhysicalDeviceSurfaceFormatsKHR(physDev, surface, &formatsCount, sFormats);
-    if (result|| !sFormats){
-        fprintf(stderr, "Device dont support image format (1)\n");
-        return 1;
-    }
-    char notfound = 1;
-    for (uint32_t i = 0; i < formatsCount; i++) 
-        if (sFormats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && sFormats[i].format == VK_FORMAT_B8G8R8A8_SRGB){
-            sFormat = sFormats[i];
-            notfound = 0;
-            break;
-        }
-    free(sFormats);
-    if (notfound) {
-        fputs("Device dont support image format (2)\n", stderr);
-        return 1;
-    }
-#endif
-
-    VkSurfaceCapabilitiesKHR sCap;
-    result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physDev, surface, &sCap);
-    if (result){
-        fputs("[Error] GetPhysicalDeviceSurfaceCapabilities\n", stderr);
-        return 19;
-    }
-
     VkSwapchainCreateInfoKHR sChainInfo = {0};
         sChainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-        sChainInfo.surface = surface;
+        sChainInfo.surface = ld->surface;
         sChainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         sChainInfo.clipped = VK_TRUE;
         sChainInfo.oldSwapchain = VK_NULL_HANDLE;
         sChainInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         sChainInfo.imageArrayLayers = 1;
 
-        sChainInfo.queueFamilyIndexCount = countUniqueQueues;
-        sChainInfo.pQueueFamilyIndices = queueFamiliesId;
-        if (countUniqueQueues > 1)
+        sChainInfo.queueFamilyIndexCount = ld->countUniqueQueues;
+        sChainInfo.pQueueFamilyIndices = ld->queueFamiliesId;
+        if (ld->countUniqueQueues > 1)
             sChainInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
         else
             sChainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -271,13 +295,13 @@ int main(void){
     #ifdef oldVsyncCode
         VkPresentModeKHR presMode = VK_PRESENT_MODE_FIFO_KHR; // default vsync
         uint32_t presModeCount;
-        result = vkGetPhysicalDeviceSurfacePresentModesKHR(physDev, surface, &presModeCount, NULL);
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(ld->physDev, surface, &presModeCount, NULL);
         if (result){
             fputs("[Error] GetPhysicalDeviceSurfacePresentModes\n", stderr);
             return 11;
         }
         VkPresentModeKHR *presModes = malloc(presModeCount * sizeof(VkPresentModeKHR));
-        result = vkGetPhysicalDeviceSurfacePresentModesKHR(physDev, surface, &presModeCount, presModes);
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(ld->physDev, surface, &presModeCount, presModes);
         if (result || !presModes){
             fputs("[Error] GetPhysicalDeviceSurfacePresentModes + malloc\n", stderr);
             return 11;
@@ -289,24 +313,24 @@ int main(void){
         sChainInfo.presentMode = presMode;
         free(presModes);
     #else
-        sChainInfo.presentMode = ansCfg.vsync;
+        sChainInfo.presentMode = ansCfg.Vsync;
     #endif
 
-    if (sCap.currentExtent.width != UINT32_MAX) {
-        sChainInfo.imageExtent = sCap.currentExtent;
+    if (ld->surfCap.currentExtent.width != UINT32_MAX) {
+        sChainInfo.imageExtent = ld->surfCap.currentExtent;
     } else {
         int w, h;
-        glfwGetFramebufferSize(window, &w, &h);
+        glfwGetFramebufferSize(ld->win, &w, &h);
         sChainInfo.imageExtent.width  = (uint32_t)w;
         sChainInfo.imageExtent.height = (uint32_t)h;
     }
-        if (sCap.maxImageCount == sCap.minImageCount)
-            sChainInfo.minImageCount = sCap.minImageCount;
+        if (ld->surfCap.maxImageCount == ld->surfCap.minImageCount)
+            sChainInfo.minImageCount = ld->surfCap.minImageCount;
         else
-            sChainInfo.minImageCount = sCap.minImageCount + 1;
-        sChainInfo.preTransform = sCap.currentTransform;
-        sChainInfo.imageFormat = sFormat.format;
-        sChainInfo.imageColorSpace = sFormat.colorSpace;
+            sChainInfo.minImageCount = ld->surfCap.minImageCount + 1;
+        sChainInfo.preTransform = ld->surfCap.currentTransform;
+        sChainInfo.imageFormat = ld->surfFormat.format;
+        sChainInfo.imageColorSpace = ld->surfFormat.colorSpace;
     
     /*printf("minImageCount=%u maxImageCount=%u currentExtent=%ux%u supportedUsage=0x%x presentMode=%d format=%d colorSpace=%d\n",
     sCap.minImageCount, sCap.maxImageCount,
@@ -315,14 +339,14 @@ int main(void){
     sChainInfo.imageFormat, sChainInfo.imageColorSpace);*/
     
     VkSwapchainKHR sChain;
-    result = vkCreateSwapchainKHR(dev, &sChainInfo, NULL, &sChain);
+    result = vkCreateSwapchainKHR(ld->dev, &sChainInfo, NULL, &sChain);
     if (result){
         fputs("[Error] CreateSwapchain\n", stderr);
         return 17;
     }
 
     uint32_t scImgc;
-    result = vkGetSwapchainImagesKHR(dev, sChain, &scImgc, NULL);
+    result = vkGetSwapchainImagesKHR(ld->dev, sChain, &scImgc, NULL);
     if (result){
         fputs("[Error] GetSwapchainImages (1)\n", stderr);
         return 15;
@@ -330,7 +354,7 @@ int main(void){
     //printf("%u\n", scImgc);
     VkImage *SCImgs = malloc(scImgc * sizeof(VkImage));
 
-    result = vkGetSwapchainImagesKHR(dev, sChain, &scImgc, SCImgs);
+    result = vkGetSwapchainImagesKHR(ld->dev, sChain, &scImgc, SCImgs);
     if (result){
         fputs("[Error] GetSwapchainImages (2)\n", stderr);
         return 15;
@@ -344,7 +368,7 @@ int main(void){
 
         imgViewInfo.image = SCImgs[i];
         imgViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        imgViewInfo.format = sFormat.format;
+        imgViewInfo.format = ld->surfFormat.format;
 
         imgViewInfo.components.r = VK_COMPONENT_SWIZZLE_R;
         imgViewInfo.components.g = VK_COMPONENT_SWIZZLE_G;
@@ -357,7 +381,7 @@ int main(void){
         imgViewInfo.subresourceRange.baseArrayLayer = 0;
         imgViewInfo.subresourceRange.levelCount = 1;
 
-        result = vkCreateImageView(dev, &imgViewInfo, NULL, imgViews+i);
+        result = vkCreateImageView(ld->dev, &imgViewInfo, NULL, imgViews+i);
         if (result){
             fputs("[Error] CreateImageView\n", stderr);
             return 21;
@@ -365,7 +389,7 @@ int main(void){
     }
 
     VkAttachmentDescription colorAttachment = {0};
-        colorAttachment.format = sFormat.format;
+        colorAttachment.format = ld->surfFormat.format;
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
         colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -401,7 +425,7 @@ int main(void){
         renderPassInfo.pDependencies = &SPDep;
 
     VkRenderPass RenderPass;
-    result = vkCreateRenderPass(dev, &renderPassInfo, NULL, &RenderPass);
+    result = vkCreateRenderPass(ld->dev, &renderPassInfo, NULL, &RenderPass);
 
     free(SCImgs);
 
@@ -410,12 +434,12 @@ int main(void){
         return 27;
     }
 
-    VkShaderModule vertShader = ansCreateShader("vert.spv", dev);
+    VkShaderModule vertShader = ansCreateShader("vert.spv", ld->dev);
     if (!vertShader){
         fputs("[Error] CreateShader (vert)\n", stderr);
         return 50;
     }
-    VkShaderModule fragShader = ansCreateShader("frag.spv", dev);
+    VkShaderModule fragShader = ansCreateShader("frag.spv", ld->dev);
     if (!fragShader){
         fputs("[Error] CreateShader (frag)\n", stderr);
         return 50;
@@ -482,7 +506,7 @@ int main(void){
         //pipelineLayoutInfo.pushConstantRangeCount = 0;
 
     VkPipelineLayout pipelineLayout;
-    result = vkCreatePipelineLayout(dev, &pipelineLayoutInfo, NULL, &pipelineLayout);
+    result = vkCreatePipelineLayout(ld->dev, &pipelineLayoutInfo, NULL, &pipelineLayout);
     if (result){
         fputs("[Error] CreatePipelineLayout\n", stderr);
         return 45;
@@ -505,10 +529,10 @@ int main(void){
        //pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
     VkPipeline pipeline;
-    result = vkCreateGraphicsPipelines(dev, NULL, 1, &pipelineInfo, NULL, &pipeline);
+    result = vkCreateGraphicsPipelines(ld->dev, NULL, 1, &pipelineInfo, NULL, &pipeline);
 
-    vkDestroyShaderModule(dev, vertShader, NULL);
-    vkDestroyShaderModule(dev, fragShader, NULL);
+    vkDestroyShaderModule(ld->dev, vertShader, NULL);
+    vkDestroyShaderModule(ld->dev, fragShader, NULL);
     
     if (result){
         fputs("[Error] CreateGraphicsPipelines\n", stderr);
@@ -525,7 +549,7 @@ int main(void){
             fbInfo.width = sChainInfo.imageExtent.width;
             fbInfo.height = sChainInfo.imageExtent.height;
             fbInfo.layers = 1;
-        result = vkCreateFramebuffer(dev, &fbInfo, NULL, FrameBuffer+i);
+        result = vkCreateFramebuffer(ld->dev, &fbInfo, NULL, FrameBuffer+i);
         if(result){
             fputs("[Error] CreateFramebuffer\n", stderr);
             return 3;
@@ -535,10 +559,10 @@ int main(void){
     VkCommandPoolCreateInfo commandPoolInfo = {0};
         commandPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        commandPoolInfo.queueFamilyIndex = queueFamiliesId[0];
+        commandPoolInfo.queueFamilyIndex = ld->queueFamiliesId[0];
 
     VkCommandPool CommandPool;
-    result = vkCreateCommandPool(dev, &commandPoolInfo, NULL, &CommandPool);
+    result = vkCreateCommandPool(ld->dev, &commandPoolInfo, NULL, &CommandPool);
     if(result){
         fputs("[Error] CommandPool\n", stderr);
         return 5;
@@ -551,7 +575,7 @@ int main(void){
         //CBAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 
     VkCommandBuffer CommandBuffers[MAX_FRAMES_IN_FLIGHT];
-    result = vkAllocateCommandBuffers(dev, &CBAllocInfo, CommandBuffers);
+    result = vkAllocateCommandBuffers(ld->dev, &CBAllocInfo, CommandBuffers);
     if(result){
         fputs("[Error] AllocateCommandBuffers\n", stderr);
         return 4;
@@ -569,17 +593,17 @@ int main(void){
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
-        result = vkCreateSemaphore(dev, &semaphoreInfo, NULL, imgAvailible + i);
+        result = vkCreateSemaphore(ld->dev, &semaphoreInfo, NULL, imgAvailible + i);
         if (result){
             fprintf(stderr, "[Error] CreateSemaphore (imgAvailible) (%u)\n", i);
             return 35;
         }
-        result = vkCreateSemaphore(dev, &semaphoreInfo, NULL, renderFinished+i);
+        result = vkCreateSemaphore(ld->dev, &semaphoreInfo, NULL, renderFinished+i);
         if (result){
             fprintf(stderr, "[Error] CreateSemaphore (renderFinished) (%u)\n", i);
             return 36;
         }
-        result = vkCreateFence(dev, &fenceInfo, NULL, fences+i);
+        result = vkCreateFence(ld->dev, &fenceInfo, NULL, fences+i);
         if (result){
             fprintf(stderr, "[Error] CreateFence (%u)\n", i);
             return 37;
@@ -629,14 +653,14 @@ int main(void){
 
     puts("[Info] Init completed");
 
-    while (!glfwWindowShouldClose(window)) {
+    while (!glfwWindowShouldClose(ld->win)) {
         //printf("frame = %u\n", currentFrame);
         glfwPollEvents();
 
-        vkWaitForFences(dev, 1, &fences[currentFrame], VK_TRUE, UINT64_MAX);
-        vkResetFences(dev, 1, &fences[currentFrame]);
+        vkWaitForFences(ld->dev, 1, &fences[currentFrame], VK_TRUE, UINT64_MAX);
+        vkResetFences(ld->dev, 1, &fences[currentFrame]);
 
-        result = vkAcquireNextImageKHR(dev, sChain, UINT64_MAX, imgAvailible[currentFrame], NULL, &imgId);
+        result = vkAcquireNextImageKHR(ld->dev, sChain, UINT64_MAX, imgAvailible[currentFrame], NULL, &imgId);
         if (result){
             fprintf(stderr, "[Error] vkAcquireNextImageKHR\n");
             exitCode = 6;
@@ -678,14 +702,14 @@ int main(void){
         presInfo.pWaitSemaphores = submitInfo.pSignalSemaphores;
         presInfo.pImageIndices = &imgId;
 
-        result = vkQueueSubmit(gfxQueue, 1, &submitInfo, fences[currentFrame]);
+        result = vkQueueSubmit(ld->gfxQueue, 1, &submitInfo, fences[currentFrame]);
         if (result){
             fputs("[Error] QueueSubmit\n", stderr);
             exitCode = 6;
             break;
         }
         
-        result = vkQueuePresentKHR(presQueue, &presInfo);
+        result = vkQueuePresentKHR(ld->presQueue, &presInfo);
         if (result){
             fputs("[Error] QueuePresentKHR\n", stderr);
             exitCode = 6;
@@ -694,31 +718,31 @@ int main(void){
 
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
-    vkDeviceWaitIdle(dev);
+    vkDeviceWaitIdle(ld->dev);
 
     for (uint32_t i = 0; i < scImgc; i++)
-        vkDestroyFramebuffer(dev, FrameBuffer[i], NULL);
-    vkDestroyPipeline(dev, pipeline, NULL);
-    vkDestroyPipelineLayout(dev, pipelineLayout, NULL);
-    vkDestroyRenderPass(dev, RenderPass, NULL);
+        vkDestroyFramebuffer(ld->dev, FrameBuffer[i], NULL);
+    vkDestroyPipeline(ld->dev, pipeline, NULL);
+    vkDestroyPipelineLayout(ld->dev, pipelineLayout, NULL);
+    vkDestroyRenderPass(ld->dev, RenderPass, NULL);
 
     for (uint32_t i = 0; i < scImgc; i++)
-        vkDestroyImageView(dev, imgViews[i], NULL);
-    vkDestroySwapchainKHR(dev,sChain, NULL);
+        vkDestroyImageView(ld->dev, imgViews[i], NULL);
+    vkDestroySwapchainKHR(ld->dev,sChain, NULL);
 
     free(FrameBuffer); free(imgViews);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        vkDestroySemaphore(dev, renderFinished[i], NULL);
-        vkDestroySemaphore(dev, imgAvailible[i], NULL);
-        vkDestroyFence(dev, fences[i], NULL);
+        vkDestroySemaphore(ld->dev, renderFinished[i], NULL);
+        vkDestroySemaphore(ld->dev, imgAvailible[i], NULL);
+        vkDestroyFence(ld->dev, fences[i], NULL);
     }
 
-    vkDestroyCommandPool(dev, CommandPool, NULL);
-    vkDestroyDevice(dev, NULL);
-    vkDestroySurfaceKHR(instance, surface, NULL);
-    vkDestroyInstance(instance, NULL);
-    glfwDestroyWindow(window);
+    vkDestroyCommandPool(ld->dev, CommandPool, NULL);
+    vkDestroyDevice(ld->dev, NULL);
+    vkDestroySurfaceKHR(ld->instance, ld->surface, NULL);
+    vkDestroyInstance(ld->instance, NULL);
+    glfwDestroyWindow(ld->win);
     glfwTerminate();
     
     return exitCode;
