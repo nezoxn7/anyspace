@@ -8,12 +8,20 @@
 #define CFG_MAX_STR_LEN 32
 
 typedef struct LibsData{
+    // 4 bytes
+    uint32_t scImgc; uint32_t countUniqueQueues;
+    // 8 bytes
     GLFWwindow* win; VkInstance instance; VkSurfaceKHR surface;
     VkPhysicalDevice physDev; VkDevice dev;
-    uint32_t countUniqueQueues; uint32_t queueFamiliesId[2]; VkQueue gfxQueue; VkQueue presQueue;
-    VkSurfaceCapabilitiesKHR surfCap; VkSurfaceFormatKHR surfFormat;
-    VkImageView *imgViews; uint32_t scImgc; VkExtent2D imgExtent;
-    VkSwapchainKHR swapchain; VkRenderPass RenderPass;
+    uint32_t queueFamiliesId[2]; VkQueue gfxQueue; VkQueue presQueue; VkSurfaceFormatKHR surfFormat;
+    VkImageView *imgViews;  VkExtent2D imgExtent; VkSwapchainKHR swapchain; VkFramebuffer *FrameBuffer;
+    VkRenderPass RenderPass; VkPipeline pipeline; VkPipelineLayout pipelineLayout;
+    VkCommandPool CommandPool;
+    // 16 bytes
+    VkSemaphore imgAvailible[MAX_FRAMES_IN_FLIGHT]; VkSemaphore renderFinished[MAX_FRAMES_IN_FLIGHT];
+    VkFence fences[MAX_FRAMES_IN_FLIGHT]; VkCommandBuffer CommandBuffers[MAX_FRAMES_IN_FLIGHT];
+    // >16
+    VkSurfaceCapabilitiesKHR surfCap;
 } LibsData;
 
 typedef struct AnsConfig{
@@ -160,7 +168,7 @@ int AnsDevInit(LibsData *ld, int GpuId){
     return 0;
 }
 
-int ansSurfaceInit(LibsData *ld){
+int ansInitSurface(LibsData *ld){
     VkResult result;
 #ifdef dontCheckFormats
     ld->surfFormat.format = VK_FORMAT_B8G8R8A8_SRGB;
@@ -307,7 +315,6 @@ int ansMkSwapChain(LibsData *ld, VkPresentModeKHR vsync){
 
     for(uint32_t i = 0; i < ld->scImgc; i++){
         imgViewInfo.image = SCImgs[i];
-
         result = vkCreateImageView(ld->dev, &imgViewInfo, NULL, ld->imgViews+i);
         if (result){
             fputs("[Error] CreateImageView\n", stderr);
@@ -315,11 +322,34 @@ int ansMkSwapChain(LibsData *ld, VkPresentModeKHR vsync){
         }
     }
     free(SCImgs);
-
     return 0;
 }
 
-int ansMkRenderPass(LibsData *ld){
+VkShaderModule ansCreateShader(char* filename, VkDevice dev){
+    FILE *shaderFp = fopen(filename, "rb");
+    if (!shaderFp) return NULL;
+    fseek(shaderFp, 0, SEEK_END);
+    size_t shaderFsize = (size_t)ftell(shaderFp);
+    if (shaderFsize % 4){
+        fclose(shaderFp); return NULL;
+    }
+    rewind(shaderFp);
+    uint32_t *shaderFile = malloc(shaderFsize);
+    fread(shaderFile, 1, shaderFsize, shaderFp);
+    fclose(shaderFp);
+    
+    VkShaderModule shaderModule;
+    VkShaderModuleCreateInfo shaderModuleInfo = {0};
+        shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        shaderModuleInfo.codeSize = shaderFsize;
+        shaderModuleInfo.pCode = shaderFile;
+    VkResult result = vkCreateShaderModule(dev, &shaderModuleInfo, NULL, &shaderModule);
+    free(shaderFile);
+    if (result) return NULL;
+    return shaderModule;
+}
+
+int ansMkRenderPassPipeline(LibsData *ld){
     VkAttachmentDescription colorAttachment = {0};
         colorAttachment.format = ld->surfFormat.format;
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -362,92 +392,6 @@ int ansMkRenderPass(LibsData *ld){
         fputs("[Error] CreateRenderPass\n", stderr);
         return 27;
     }
-    return 0;
-}
-
-AnsConfig ansGetConfig(char* filename){
-    AnsConfig config = {0};
-    FILE *fp = fopen(filename, "r");
-    if (!fp) return config; // width = 0 -> error
-
-    char str[CFG_MAX_STR_LEN] = {0};
-    while (fgets(str, CFG_MAX_STR_LEN, fp)){
-        if (str[0] == '#') continue;
-        if (str[6] == 'W') // recognise strings by key symbols
-            config.WinWidth = atoi(str + 14);
-        else if (str[6] == 'H')
-            config.WinHeight = atoi(str + 15);
-        else if (str[1] == 'u'){
-            if (str[18] == '0') config.VkVersion = VK_API_VERSION_1_0;
-            else if (str[18] == '1') config.VkVersion = VK_API_VERSION_1_1;
-            else if (str[18] == '2') config.VkVersion = VK_API_VERSION_1_2;
-            else if (str[18] == '3') config.VkVersion = VK_API_VERSION_1_3;
-            else config.VkVersion = VK_API_VERSION_1_4;
-        }
-        else if (str[0] == 'G')
-            config.GpuId = atoi(str + 8);
-        else {
-            if (str[12] == 'f') config.Vsync = VK_PRESENT_MODE_FIFO_KHR;
-            else if (str[12] == 'm') config.Vsync = VK_PRESENT_MODE_MAILBOX_KHR;
-            else config.Vsync = VK_PRESENT_MODE_IMMEDIATE_KHR;
-        }
-    }
-    if (!config.WinHeight || !config.VkVersion)
-        config.WinWidth = 0;
-    fclose(fp);
-    return config;
-}
-
-VkShaderModule ansCreateShader(char* filename, VkDevice dev){
-    FILE *shaderFp = fopen(filename, "rb");
-    if (!shaderFp) return NULL;
-    fseek(shaderFp, 0, SEEK_END);
-    size_t shaderFsize = (size_t)ftell(shaderFp);
-    if (shaderFsize % 4){
-        fclose(shaderFp); return NULL;
-    }
-    rewind(shaderFp);
-    uint32_t *shaderFile = malloc(shaderFsize);
-    fread(shaderFile, 1, shaderFsize, shaderFp);
-    fclose(shaderFp);
-    
-    VkShaderModule shaderModule;
-    VkShaderModuleCreateInfo shaderModuleInfo = {0};
-        shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        shaderModuleInfo.codeSize = shaderFsize;
-        shaderModuleInfo.pCode = shaderFile;
-    VkResult result = vkCreateShaderModule(dev, &shaderModuleInfo, NULL, &shaderModule);
-    free(shaderFile);
-    if (result) return NULL;
-    return shaderModule;
-}
-
-int main(void){
-    VkResult result; // temp
-    LibsData *ld = calloc(sizeof(LibsData), 1U);
-    AnsConfig ansCfg = ansGetConfig("config.cfg");
-    
-    //printf("%u\n", ld->countUniqueQueues);
-    if (!ansCfg.WinWidth){
-        fputs("[Error] Invalid or mising config file\n", stderr);
-        return 6;
-    }
-
-    int exitCode = AnsMkWinInstSurf(ld, &ansCfg);
-    if (exitCode) return exitCode;
-
-    exitCode = AnsDevInit(ld, ansCfg.GpuId);
-    if (exitCode) return exitCode;
-
-    exitCode = ansSurfaceInit(ld);
-    if (exitCode) return exitCode;
-    
-    exitCode = ansMkSwapChain(ld, ansCfg.Vsync);
-    if (exitCode) return exitCode;
-
-    exitCode = ansMkRenderPass(ld);
-    if (exitCode) return exitCode;
-
     VkShaderModule vertShader = ansCreateShader("vert.spv", ld->dev);
     if (!vertShader){
         fputs("[Error] CreateShader (vert)\n", stderr);
@@ -519,8 +463,7 @@ int main(void){
         //pipelineLayoutInfo.setLayoutCount = 0;
         //pipelineLayoutInfo.pushConstantRangeCount = 0;
 
-    VkPipelineLayout pipelineLayout;
-    result = vkCreatePipelineLayout(ld->dev, &pipelineLayoutInfo, NULL, &pipelineLayout);
+    result = vkCreatePipelineLayout(ld->dev, &pipelineLayoutInfo, NULL, &ld->pipelineLayout);
     if (result){
         fputs("[Error] CreatePipelineLayout\n", stderr);
         return 45;
@@ -537,13 +480,12 @@ int main(void){
         pipelineInfo.pMultisampleState = &multiSampleInfo;
         pipelineInfo.pColorBlendState = &colorBlendInfo;
         pipelineInfo.pDynamicState = &dynamicStateInfo;
-        pipelineInfo.layout = pipelineLayout;
+        pipelineInfo.layout = ld->pipelineLayout;
         pipelineInfo.renderPass = ld->RenderPass;
        //pipelineInfo.subpass = 0;
        //pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
-    VkPipeline pipeline;
-    result = vkCreateGraphicsPipelines(ld->dev, NULL, 1, &pipelineInfo, NULL, &pipeline);
+    result = vkCreateGraphicsPipelines(ld->dev, NULL, 1, &pipelineInfo, NULL, &ld->pipeline);
 
     vkDestroyShaderModule(ld->dev, vertShader, NULL);
     vkDestroyShaderModule(ld->dev, fragShader, NULL);
@@ -552,31 +494,38 @@ int main(void){
         fputs("[Error] CreateGraphicsPipelines\n", stderr);
         return 25;
     }
+    return 0;
+}
 
-    VkFramebuffer *FrameBuffer = malloc(ld->scImgc * sizeof(VkFramebuffer));
+int ansMkFrameBuffers(LibsData *ld){
+    ld->FrameBuffer = malloc(ld->scImgc * sizeof(VkFramebuffer));
+    VkFramebufferCreateInfo fbInfo = {0};
+        fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fbInfo.renderPass = ld->RenderPass;
+        fbInfo.attachmentCount = 1;
+        fbInfo.width = ld->imgExtent.width;
+        fbInfo.height = ld->imgExtent.height;
+        fbInfo.layers = 1;
     for(uint32_t i = 0; i < ld->scImgc; i++){
-        VkFramebufferCreateInfo fbInfo = {0};
-            fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass = ld->RenderPass;
-            fbInfo.attachmentCount = 1;
-            fbInfo.pAttachments = ld->imgViews+i;
-            fbInfo.width = ld->imgExtent.width;
-            fbInfo.height = ld->imgExtent.height;
-            fbInfo.layers = 1;
-        result = vkCreateFramebuffer(ld->dev, &fbInfo, NULL, FrameBuffer+i);
+        fbInfo.pAttachments = ld->imgViews+i;
+        
+        VkResult result = vkCreateFramebuffer(ld->dev, &fbInfo, NULL, ld->FrameBuffer+i);
         if(result){
             fputs("[Error] CreateFramebuffer\n", stderr);
             return 3;
         }
     }
+    return 0;
+}
 
-    VkCommandPoolCreateInfo commandPoolInfo = {0};
+int ansMkCommand(LibsData *ld){
+     VkCommandPoolCreateInfo commandPoolInfo = {0};
         commandPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         commandPoolInfo.queueFamilyIndex = ld->queueFamiliesId[0];
 
-    VkCommandPool CommandPool;
-    result = vkCreateCommandPool(ld->dev, &commandPoolInfo, NULL, &CommandPool);
+    
+    VkResult result = vkCreateCommandPool(ld->dev, &commandPoolInfo, NULL, &ld->CommandPool);
     if(result){
         fputs("[Error] CommandPool\n", stderr);
         return 5;
@@ -585,19 +534,14 @@ int main(void){
     VkCommandBufferAllocateInfo CBAllocInfo = {0};
         CBAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         CBAllocInfo.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
-        CBAllocInfo.commandPool = CommandPool;
+        CBAllocInfo.commandPool = ld->CommandPool;
         //CBAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 
-    VkCommandBuffer CommandBuffers[MAX_FRAMES_IN_FLIGHT];
-    result = vkAllocateCommandBuffers(ld->dev, &CBAllocInfo, CommandBuffers);
+    result = vkAllocateCommandBuffers(ld->dev, &CBAllocInfo, ld->CommandBuffers);
     if(result){
         fputs("[Error] AllocateCommandBuffers\n", stderr);
         return 4;
     }
-
-    VkSemaphore imgAvailible[MAX_FRAMES_IN_FLIGHT];
-    VkSemaphore renderFinished[MAX_FRAMES_IN_FLIGHT];
-    VkFence fences[MAX_FRAMES_IN_FLIGHT];
 
     VkSemaphoreCreateInfo semaphoreInfo = {0};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -607,23 +551,27 @@ int main(void){
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
-        result = vkCreateSemaphore(ld->dev, &semaphoreInfo, NULL, imgAvailible + i);
+        result = vkCreateSemaphore(ld->dev, &semaphoreInfo, NULL, ld->imgAvailible + i);
         if (result){
             fprintf(stderr, "[Error] CreateSemaphore (imgAvailible) (%u)\n", i);
             return 35;
         }
-        result = vkCreateSemaphore(ld->dev, &semaphoreInfo, NULL, renderFinished+i);
+        result = vkCreateSemaphore(ld->dev, &semaphoreInfo, NULL, ld->renderFinished+i);
         if (result){
             fprintf(stderr, "[Error] CreateSemaphore (renderFinished) (%u)\n", i);
             return 36;
         }
-        result = vkCreateFence(ld->dev, &fenceInfo, NULL, fences+i);
+        result = vkCreateFence(ld->dev, &fenceInfo, NULL, ld->fences+i);
         if (result){
             fprintf(stderr, "[Error] CreateFence (%u)\n", i);
             return 37;
         }
     }
+    return 0;
+}
 
+int ansRunCycle(LibsData *ld){
+    VkResult result; int exitCode = 0;
     uint32_t currentFrame = 0;
     uint32_t imgId;
     VkClearValue clearValue = {{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -665,58 +613,56 @@ int main(void){
         presInfo.swapchainCount = 1;
         presInfo.pSwapchains = &ld->swapchain;
 
-    puts("[Info] Init completed");
-
     while (!glfwWindowShouldClose(ld->win)) {
         //printf("frame = %u\n", currentFrame);
         glfwPollEvents();
 
-        vkWaitForFences(ld->dev, 1, &fences[currentFrame], VK_TRUE, UINT64_MAX);
-        vkResetFences(ld->dev, 1, &fences[currentFrame]);
+        vkWaitForFences(ld->dev, 1, ld->fences+currentFrame, VK_TRUE, UINT64_MAX);
+        vkResetFences(ld->dev, 1, ld->fences+currentFrame);
 
-        result = vkAcquireNextImageKHR(ld->dev, ld->swapchain, UINT64_MAX, imgAvailible[currentFrame], NULL, &imgId);
+        result = vkAcquireNextImageKHR(ld->dev, ld->swapchain, UINT64_MAX, ld->imgAvailible[currentFrame], NULL, &imgId);
         if (result){
             fprintf(stderr, "[Error] vkAcquireNextImageKHR\n");
             exitCode = 6;
             break;
         }
 
-        RPBeginInfo.framebuffer = FrameBuffer[imgId];
+        RPBeginInfo.framebuffer = ld->FrameBuffer[imgId];
 
-        result = vkResetCommandBuffer(CommandBuffers[currentFrame], 0);
+        result = vkResetCommandBuffer(ld->CommandBuffers[currentFrame], 0);
         if (result){
             fputs("[Error] vkResetCommandBuffer\n", stderr);
             exitCode = 6;
             break;
         }
-        result = vkBeginCommandBuffer(CommandBuffers[currentFrame], &CBbeginInfo);
+        result = vkBeginCommandBuffer(ld->CommandBuffers[currentFrame], &CBbeginInfo);
         if (result){
             fputs("[Error] vkBeginCommandBuffer\n", stderr);
             exitCode = 6;
             break;
         }
 
-        vkCmdBeginRenderPass(CommandBuffers[currentFrame], &RPBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(CommandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-        vkCmdSetViewport(CommandBuffers[currentFrame], 0, 1, &viewport);
-        vkCmdSetScissor(CommandBuffers[currentFrame], 0, 1, &scissor);
-        vkCmdDraw(CommandBuffers[currentFrame], 3, 1, 0, 0);
+        vkCmdBeginRenderPass(ld->CommandBuffers[currentFrame], &RPBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(ld->CommandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, ld->pipeline);
+        vkCmdSetViewport(ld->CommandBuffers[currentFrame], 0, 1, &viewport);
+        vkCmdSetScissor(ld->CommandBuffers[currentFrame], 0, 1, &scissor);
+        vkCmdDraw(ld->CommandBuffers[currentFrame], 3, 1, 0, 0);
 
-        vkCmdEndRenderPass(CommandBuffers[currentFrame]);
-        result = vkEndCommandBuffer(CommandBuffers[currentFrame]);
+        vkCmdEndRenderPass(ld->CommandBuffers[currentFrame]);
+        result = vkEndCommandBuffer(ld->CommandBuffers[currentFrame]);
         if (result){
             fputs("[Error] EndCommandBuffer\n", stderr);
             exitCode = 6;
             break;
         }
-        submitInfo.pCommandBuffers = CommandBuffers + currentFrame;
-        submitInfo.pWaitSemaphores = imgAvailible + currentFrame;
-        submitInfo.pSignalSemaphores = renderFinished + currentFrame;
+        submitInfo.pCommandBuffers = ld->CommandBuffers + currentFrame;
+        submitInfo.pWaitSemaphores = ld->imgAvailible + currentFrame;
+        submitInfo.pSignalSemaphores = ld->renderFinished + currentFrame;
 
         presInfo.pWaitSemaphores = submitInfo.pSignalSemaphores;
         presInfo.pImageIndices = &imgId;
 
-        result = vkQueueSubmit(ld->gfxQueue, 1, &submitInfo, fences[currentFrame]);
+        result = vkQueueSubmit(ld->gfxQueue, 1, &submitInfo, ld->fences[currentFrame]);
         if (result){
             fputs("[Error] QueueSubmit\n", stderr);
             exitCode = 6;
@@ -732,32 +678,107 @@ int main(void){
 
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
+    return exitCode;
+}
+
+void ansClean(LibsData *ld){
     vkDeviceWaitIdle(ld->dev);
 
     for (uint32_t i = 0; i < ld->scImgc; i++)
-        vkDestroyFramebuffer(ld->dev, FrameBuffer[i], NULL);
-    vkDestroyPipeline(ld->dev, pipeline, NULL);
-    vkDestroyPipelineLayout(ld->dev, pipelineLayout, NULL);
+        vkDestroyFramebuffer(ld->dev, ld->FrameBuffer[i], NULL);
+    vkDestroyPipeline(ld->dev, ld->pipeline, NULL);
+    vkDestroyPipelineLayout(ld->dev, ld->pipelineLayout, NULL);
     vkDestroyRenderPass(ld->dev, ld->RenderPass, NULL);
 
     for (uint32_t i = 0; i < ld->scImgc; i++)
         vkDestroyImageView(ld->dev, ld->imgViews[i], NULL);
     vkDestroySwapchainKHR(ld->dev, ld->swapchain, NULL);
 
-    free(FrameBuffer); free(ld->imgViews);
+    free(ld->FrameBuffer); free(ld->imgViews);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        vkDestroySemaphore(ld->dev, renderFinished[i], NULL);
-        vkDestroySemaphore(ld->dev, imgAvailible[i], NULL);
-        vkDestroyFence(ld->dev, fences[i], NULL);
+        vkDestroySemaphore(ld->dev, ld->renderFinished[i], NULL);
+        vkDestroySemaphore(ld->dev, ld->imgAvailible[i], NULL);
+        vkDestroyFence(ld->dev, ld->fences[i], NULL);
     }
 
-    vkDestroyCommandPool(ld->dev, CommandPool, NULL);
+    vkDestroyCommandPool(ld->dev, ld->CommandPool, NULL);
     vkDestroyDevice(ld->dev, NULL);
     vkDestroySurfaceKHR(ld->instance, ld->surface, NULL);
     vkDestroyInstance(ld->instance, NULL);
     glfwDestroyWindow(ld->win);
     glfwTerminate();
+}
+
+AnsConfig ansGetConfig(char* filename){
+    AnsConfig config = {0};
+    FILE *fp = fopen(filename, "r");
+    if (!fp) return config; // width = 0 -> error
+
+    char str[CFG_MAX_STR_LEN] = {0};
+    while (fgets(str, CFG_MAX_STR_LEN, fp)){
+        if (str[0] == '#') continue;
+        if (str[6] == 'W') // recognise strings by key symbols
+            config.WinWidth = atoi(str + 14);
+        else if (str[6] == 'H')
+            config.WinHeight = atoi(str + 15);
+        else if (str[1] == 'u'){
+            if (str[18] == '0') config.VkVersion = VK_API_VERSION_1_0;
+            else if (str[18] == '1') config.VkVersion = VK_API_VERSION_1_1;
+            else if (str[18] == '2') config.VkVersion = VK_API_VERSION_1_2;
+            else if (str[18] == '3') config.VkVersion = VK_API_VERSION_1_3;
+            else config.VkVersion = VK_API_VERSION_1_4;
+        }
+        else if (str[0] == 'G')
+            config.GpuId = atoi(str + 8);
+        else {
+            if (str[12] == 'f') config.Vsync = VK_PRESENT_MODE_FIFO_KHR;
+            else if (str[12] == 'm') config.Vsync = VK_PRESENT_MODE_MAILBOX_KHR;
+            else config.Vsync = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+    }
+    if (!config.WinHeight || !config.VkVersion)
+        config.WinWidth = 0;
+    fclose(fp);
+    return config;
+}
+
+int main(void){
+    VkResult result; // temp
+    LibsData *ld = malloc(sizeof(LibsData));
+    AnsConfig ansCfg = ansGetConfig("config.cfg");
     
+    //printf("%u\n", ld->countUniqueQueues);
+    if (!ansCfg.WinWidth){
+        fputs("[Error] Invalid or mising config file\n", stderr);
+        return 6;
+    }
+
+    int exitCode = AnsMkWinInstSurf(ld, &ansCfg);
+    if (exitCode) return exitCode;
+
+    exitCode = AnsDevInit(ld, ansCfg.GpuId);
+    if (exitCode) return exitCode;
+
+    exitCode = ansInitSurface(ld);
+    if (exitCode) return exitCode;
+    
+    exitCode = ansMkSwapChain(ld, ansCfg.Vsync);
+    if (exitCode) return exitCode;
+
+    exitCode = ansMkRenderPassPipeline(ld);
+    if (exitCode) return exitCode;
+
+    exitCode = ansMkFrameBuffers(ld);
+    if (exitCode) return exitCode;
+
+    exitCode = ansMkCommand(ld);
+    if (exitCode) return exitCode;
+
+    puts("[Info] Init completed");
+
+    exitCode = ansRunCycle(ld);
+
+    ansClean(ld);
     return exitCode;
 }
