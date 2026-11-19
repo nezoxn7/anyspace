@@ -10,10 +10,10 @@
 typedef struct LibsData{
     GLFWwindow* win; VkInstance instance; VkSurfaceKHR surface;
     VkPhysicalDevice physDev; VkDevice dev;
-    uint32_t countUniqueQueues; uint32_t queueFamiliesId[2];
-    VkQueue gfxQueue; VkQueue presQueue;
-    VkSurfaceCapabilitiesKHR surfCap;
-    VkSurfaceFormatKHR surfFormat;
+    uint32_t countUniqueQueues; uint32_t queueFamiliesId[2]; VkQueue gfxQueue; VkQueue presQueue;
+    VkSurfaceCapabilitiesKHR surfCap; VkSurfaceFormatKHR surfFormat;
+    VkImageView *imgViews; uint32_t scImgc; VkExtent2D imgExtent;
+    VkSwapchainKHR swapchain; VkRenderPass RenderPass;
 } LibsData;
 
 typedef struct AnsConfig{
@@ -159,6 +159,7 @@ int AnsDevInit(LibsData *ld, int GpuId){
     vkGetDeviceQueue(ld->dev, ld->queueFamiliesId[1], 0, &ld->presQueue);
     return 0;
 }
+
 int ansSurfaceInit(LibsData *ld){
     VkResult result;
 #ifdef dontCheckFormats
@@ -195,6 +196,171 @@ int ansSurfaceInit(LibsData *ld){
     if (result){
         fputs("[Error] GetPhysicalDeviceSurfaceCapabilities\n", stderr);
         return 19;
+    }
+    return 0;
+}
+
+int ansMkSwapChain(LibsData *ld, VkPresentModeKHR vsync){
+    VkResult result;
+    VkSwapchainCreateInfoKHR sChainInfo = {0};
+        sChainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        sChainInfo.surface = ld->surface;
+        sChainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        sChainInfo.clipped = VK_TRUE;
+        sChainInfo.oldSwapchain = VK_NULL_HANDLE;
+        sChainInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        sChainInfo.imageArrayLayers = 1;
+
+        sChainInfo.queueFamilyIndexCount = ld->countUniqueQueues;
+        sChainInfo.pQueueFamilyIndices = ld->queueFamiliesId;
+        if (ld->countUniqueQueues > 1)
+            sChainInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        else
+            sChainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    #ifdef oldVsyncCode
+        VkPresentModeKHR presMode = VK_PRESENT_MODE_FIFO_KHR; // default vsync
+        uint32_t presModeCount;
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(ld->physDev, surface, &presModeCount, NULL);
+        if (result){
+            fputs("[Error] GetPhysicalDeviceSurfacePresentModes\n", stderr);
+            return 11;
+        }
+        VkPresentModeKHR *presModes = malloc(presModeCount * sizeof(VkPresentModeKHR));
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(ld->physDev, surface, &presModeCount, presModes);
+        if (result || !presModes){
+            fputs("[Error] GetPhysicalDeviceSurfacePresentModes + malloc\n", stderr);
+            return 11;
+        }
+        for (uint32_t i = 0; i < presModeCount; i++)
+            if (presModes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+                presMode = VK_PRESENT_MODE_MAILBOX_KHR; // better vsync
+                break; }
+        sChainInfo.presentMode = presMode;
+        free(presModes);
+    #else
+        sChainInfo.presentMode = vsync;
+    #endif
+    
+    if (ld->surfCap.currentExtent.width != UINT32_MAX)
+        sChainInfo.imageExtent = ld->surfCap.currentExtent;
+    else {
+        int w, h;
+        glfwGetFramebufferSize(ld->win, &w, &h);
+        sChainInfo.imageExtent.width  = (uint32_t)w;
+        sChainInfo.imageExtent.height = (uint32_t)h;
+    }
+    ld->imgExtent = sChainInfo.imageExtent;
+    
+    if (ld->surfCap.maxImageCount == ld->surfCap.minImageCount)
+        sChainInfo.minImageCount = ld->surfCap.minImageCount;
+    else
+        sChainInfo.minImageCount = ld->surfCap.minImageCount + 1;
+    sChainInfo.preTransform = ld->surfCap.currentTransform;
+    sChainInfo.imageFormat = ld->surfFormat.format;
+    sChainInfo.imageColorSpace = ld->surfFormat.colorSpace;
+    
+    /*printf("minImageCount=%u maxImageCount=%u currentExtent=%ux%u supportedUsage=0x%x presentMode=%d format=%d colorSpace=%d\n",
+    sCap.minImageCount, sCap.maxImageCount,
+    sCap.currentExtent.width, sCap.currentExtent.height,
+    sCap.supportedUsageFlags, sChainInfo.presentMode,
+    sChainInfo.imageFormat, sChainInfo.imageColorSpace);*/
+    
+    
+    result = vkCreateSwapchainKHR(ld->dev, &sChainInfo, NULL, &ld->swapchain);
+    if (result){
+        fputs("[Error] CreateSwapchain\n", stderr);
+        return 17;
+    }
+
+    result = vkGetSwapchainImagesKHR(ld->dev, ld->swapchain, &ld->scImgc, NULL);
+    if (result){
+        fputs("[Error] GetSwapchainImages (1)\n", stderr);
+        return 15;
+    }
+    //printf("%u\n", scImgc);
+    VkImage *SCImgs = malloc(ld->scImgc * sizeof(VkImage));
+
+    result = vkGetSwapchainImagesKHR(ld->dev, ld->swapchain, &ld->scImgc, SCImgs);
+    if (result){
+        fputs("[Error] GetSwapchainImages (2)\n", stderr);
+        return 15;
+    }
+
+    ld->imgViews = malloc(ld->scImgc * sizeof(VkImageView));
+
+    VkImageViewCreateInfo imgViewInfo = {0};
+        imgViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;    
+        imgViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        imgViewInfo.format = ld->surfFormat.format;
+
+        imgViewInfo.components.r = VK_COMPONENT_SWIZZLE_R;
+        imgViewInfo.components.g = VK_COMPONENT_SWIZZLE_G;
+        imgViewInfo.components.b = VK_COMPONENT_SWIZZLE_B;
+        imgViewInfo.components.a = VK_COMPONENT_SWIZZLE_A;
+
+        imgViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;    
+        imgViewInfo.subresourceRange.baseMipLevel = 0;
+        imgViewInfo.subresourceRange.layerCount = 1;
+        imgViewInfo.subresourceRange.baseArrayLayer = 0;
+        imgViewInfo.subresourceRange.levelCount = 1;
+
+    for(uint32_t i = 0; i < ld->scImgc; i++){
+        imgViewInfo.image = SCImgs[i];
+
+        result = vkCreateImageView(ld->dev, &imgViewInfo, NULL, ld->imgViews+i);
+        if (result){
+            fputs("[Error] CreateImageView\n", stderr);
+            return 21;
+        }
+    }
+    free(SCImgs);
+
+    return 0;
+}
+
+int ansMkRenderPass(LibsData *ld){
+    VkAttachmentDescription colorAttachment = {0};
+        colorAttachment.format = ld->surfFormat.format;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    
+    VkAttachmentReference coloRef = {0};
+        coloRef.attachment = 0;
+        coloRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subPass = {0};
+        subPass.colorAttachmentCount = 1;
+        subPass.pColorAttachments = &coloRef;
+        subPass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+
+    VkSubpassDependency SPDep = {0};
+        SPDep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        SPDep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        SPDep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        SPDep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        //SPDep.dstSubpass = 0;
+        //SPDep.srcAccessMask = 0;
+
+    VkRenderPassCreateInfo renderPassInfo = {0};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments = &colorAttachment;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subPass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &SPDep;
+    
+    VkResult result = vkCreateRenderPass(ld->dev, &renderPassInfo, NULL, &ld->RenderPass);
+
+    if (result){
+        fputs("[Error] CreateRenderPass\n", stderr);
+        return 27;
     }
     return 0;
 }
@@ -257,7 +423,7 @@ VkShaderModule ansCreateShader(char* filename, VkDevice dev){
 }
 
 int main(void){
-    VkResult result;
+    VkResult result; // temp
     LibsData *ld = calloc(sizeof(LibsData), 1U);
     AnsConfig ansCfg = ansGetConfig("config.cfg");
     
@@ -276,163 +442,11 @@ int main(void){
     exitCode = ansSurfaceInit(ld);
     if (exitCode) return exitCode;
     
-    VkSwapchainCreateInfoKHR sChainInfo = {0};
-        sChainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-        sChainInfo.surface = ld->surface;
-        sChainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        sChainInfo.clipped = VK_TRUE;
-        sChainInfo.oldSwapchain = VK_NULL_HANDLE;
-        sChainInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        sChainInfo.imageArrayLayers = 1;
+    exitCode = ansMkSwapChain(ld, ansCfg.Vsync);
+    if (exitCode) return exitCode;
 
-        sChainInfo.queueFamilyIndexCount = ld->countUniqueQueues;
-        sChainInfo.pQueueFamilyIndices = ld->queueFamiliesId;
-        if (ld->countUniqueQueues > 1)
-            sChainInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
-        else
-            sChainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    #ifdef oldVsyncCode
-        VkPresentModeKHR presMode = VK_PRESENT_MODE_FIFO_KHR; // default vsync
-        uint32_t presModeCount;
-        result = vkGetPhysicalDeviceSurfacePresentModesKHR(ld->physDev, surface, &presModeCount, NULL);
-        if (result){
-            fputs("[Error] GetPhysicalDeviceSurfacePresentModes\n", stderr);
-            return 11;
-        }
-        VkPresentModeKHR *presModes = malloc(presModeCount * sizeof(VkPresentModeKHR));
-        result = vkGetPhysicalDeviceSurfacePresentModesKHR(ld->physDev, surface, &presModeCount, presModes);
-        if (result || !presModes){
-            fputs("[Error] GetPhysicalDeviceSurfacePresentModes + malloc\n", stderr);
-            return 11;
-        }
-        for (uint32_t i = 0; i < presModeCount; i++)
-            if (presModes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
-                presMode = VK_PRESENT_MODE_MAILBOX_KHR; // better vsync
-                break; }
-        sChainInfo.presentMode = presMode;
-        free(presModes);
-    #else
-        sChainInfo.presentMode = ansCfg.Vsync;
-    #endif
-
-    if (ld->surfCap.currentExtent.width != UINT32_MAX) {
-        sChainInfo.imageExtent = ld->surfCap.currentExtent;
-    } else {
-        int w, h;
-        glfwGetFramebufferSize(ld->win, &w, &h);
-        sChainInfo.imageExtent.width  = (uint32_t)w;
-        sChainInfo.imageExtent.height = (uint32_t)h;
-    }
-        if (ld->surfCap.maxImageCount == ld->surfCap.minImageCount)
-            sChainInfo.minImageCount = ld->surfCap.minImageCount;
-        else
-            sChainInfo.minImageCount = ld->surfCap.minImageCount + 1;
-        sChainInfo.preTransform = ld->surfCap.currentTransform;
-        sChainInfo.imageFormat = ld->surfFormat.format;
-        sChainInfo.imageColorSpace = ld->surfFormat.colorSpace;
-    
-    /*printf("minImageCount=%u maxImageCount=%u currentExtent=%ux%u supportedUsage=0x%x presentMode=%d format=%d colorSpace=%d\n",
-    sCap.minImageCount, sCap.maxImageCount,
-    sCap.currentExtent.width, sCap.currentExtent.height,
-    sCap.supportedUsageFlags, sChainInfo.presentMode,
-    sChainInfo.imageFormat, sChainInfo.imageColorSpace);*/
-    
-    VkSwapchainKHR sChain;
-    result = vkCreateSwapchainKHR(ld->dev, &sChainInfo, NULL, &sChain);
-    if (result){
-        fputs("[Error] CreateSwapchain\n", stderr);
-        return 17;
-    }
-
-    uint32_t scImgc;
-    result = vkGetSwapchainImagesKHR(ld->dev, sChain, &scImgc, NULL);
-    if (result){
-        fputs("[Error] GetSwapchainImages (1)\n", stderr);
-        return 15;
-    }
-    //printf("%u\n", scImgc);
-    VkImage *SCImgs = malloc(scImgc * sizeof(VkImage));
-
-    result = vkGetSwapchainImagesKHR(ld->dev, sChain, &scImgc, SCImgs);
-    if (result){
-        fputs("[Error] GetSwapchainImages (2)\n", stderr);
-        return 15;
-    }
-
-    VkImageView *imgViews = malloc(scImgc * sizeof(VkImageView));
-
-    for(uint32_t i = 0; i < scImgc; i++){
-        VkImageViewCreateInfo imgViewInfo = {0};
-        imgViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-
-        imgViewInfo.image = SCImgs[i];
-        imgViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        imgViewInfo.format = ld->surfFormat.format;
-
-        imgViewInfo.components.r = VK_COMPONENT_SWIZZLE_R;
-        imgViewInfo.components.g = VK_COMPONENT_SWIZZLE_G;
-        imgViewInfo.components.b = VK_COMPONENT_SWIZZLE_B;
-        imgViewInfo.components.a = VK_COMPONENT_SWIZZLE_A;
-
-        imgViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;    
-        imgViewInfo.subresourceRange.baseMipLevel = 0;
-        imgViewInfo.subresourceRange.layerCount = 1;
-        imgViewInfo.subresourceRange.baseArrayLayer = 0;
-        imgViewInfo.subresourceRange.levelCount = 1;
-
-        result = vkCreateImageView(ld->dev, &imgViewInfo, NULL, imgViews+i);
-        if (result){
-            fputs("[Error] CreateImageView\n", stderr);
-            return 21;
-        }
-    }
-
-    VkAttachmentDescription colorAttachment = {0};
-        colorAttachment.format = ld->surfFormat.format;
-        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    
-    VkAttachmentReference coloRef = {0};
-        coloRef.attachment = 0;
-        coloRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subPass = {0};
-        subPass.colorAttachmentCount = 1;
-        subPass.pColorAttachments = &coloRef;
-        subPass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-
-    VkSubpassDependency SPDep = {0};
-        SPDep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        SPDep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        SPDep.srcSubpass = VK_SUBPASS_EXTERNAL;
-        SPDep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        //SPDep.dstSubpass = 0;
-        //SPDep.srcAccessMask = 0;
-
-    VkRenderPassCreateInfo renderPassInfo = {0};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        renderPassInfo.attachmentCount = 1;
-        renderPassInfo.pAttachments = &colorAttachment;
-        renderPassInfo.subpassCount = 1;
-        renderPassInfo.pSubpasses = &subPass;
-        renderPassInfo.dependencyCount = 1;
-        renderPassInfo.pDependencies = &SPDep;
-
-    VkRenderPass RenderPass;
-    result = vkCreateRenderPass(ld->dev, &renderPassInfo, NULL, &RenderPass);
-
-    free(SCImgs);
-
-    if (result){
-        fputs("[Error] CreateRenderPass\n", stderr);
-        return 27;
-    }
+    exitCode = ansMkRenderPass(ld);
+    if (exitCode) return exitCode;
 
     VkShaderModule vertShader = ansCreateShader("vert.spv", ld->dev);
     if (!vertShader){
@@ -524,7 +538,7 @@ int main(void){
         pipelineInfo.pColorBlendState = &colorBlendInfo;
         pipelineInfo.pDynamicState = &dynamicStateInfo;
         pipelineInfo.layout = pipelineLayout;
-        pipelineInfo.renderPass = RenderPass;
+        pipelineInfo.renderPass = ld->RenderPass;
        //pipelineInfo.subpass = 0;
        //pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
@@ -539,15 +553,15 @@ int main(void){
         return 25;
     }
 
-    VkFramebuffer *FrameBuffer = malloc(scImgc * sizeof(VkFramebuffer));
-    for(uint32_t i = 0; i < scImgc; i++){
+    VkFramebuffer *FrameBuffer = malloc(ld->scImgc * sizeof(VkFramebuffer));
+    for(uint32_t i = 0; i < ld->scImgc; i++){
         VkFramebufferCreateInfo fbInfo = {0};
             fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass = RenderPass;
+            fbInfo.renderPass = ld->RenderPass;
             fbInfo.attachmentCount = 1;
-            fbInfo.pAttachments = imgViews+i;
-            fbInfo.width = sChainInfo.imageExtent.width;
-            fbInfo.height = sChainInfo.imageExtent.height;
+            fbInfo.pAttachments = ld->imgViews+i;
+            fbInfo.width = ld->imgExtent.width;
+            fbInfo.height = ld->imgExtent.height;
             fbInfo.layers = 1;
         result = vkCreateFramebuffer(ld->dev, &fbInfo, NULL, FrameBuffer+i);
         if(result){
@@ -627,29 +641,29 @@ int main(void){
     
     VkRenderPassBeginInfo RPBeginInfo = {0};
         RPBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        RPBeginInfo.renderPass = RenderPass;
+        RPBeginInfo.renderPass = ld->RenderPass;
         //RPBeginInfo.renderArea.offset.x = 0;
         //RPBeginInfo.renderArea.offset.y = 0;
-        RPBeginInfo.renderArea.extent = sChainInfo.imageExtent;
+        RPBeginInfo.renderArea.extent = ld->imgExtent;
         RPBeginInfo.pClearValues = &clearValue;
         RPBeginInfo.clearValueCount = 1;
 
     VkViewport viewport = {0};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
-        viewport.width = (float)sChainInfo.imageExtent.width;
-        viewport.height = (float)sChainInfo.imageExtent.height;
+        viewport.width = (float)ld->imgExtent.width;
+        viewport.height = (float)ld->imgExtent.height;
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
 
     VkRect2D scissor = {0};
         //scissor.offset.x = 0;
-        scissor.extent = sChainInfo.imageExtent;
+        scissor.extent = ld->imgExtent;
     
     VkPresentInfoKHR presInfo = {0};
         presInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         presInfo.swapchainCount = 1;
-        presInfo.pSwapchains = &sChain;
+        presInfo.pSwapchains = &ld->swapchain;
 
     puts("[Info] Init completed");
 
@@ -660,7 +674,7 @@ int main(void){
         vkWaitForFences(ld->dev, 1, &fences[currentFrame], VK_TRUE, UINT64_MAX);
         vkResetFences(ld->dev, 1, &fences[currentFrame]);
 
-        result = vkAcquireNextImageKHR(ld->dev, sChain, UINT64_MAX, imgAvailible[currentFrame], NULL, &imgId);
+        result = vkAcquireNextImageKHR(ld->dev, ld->swapchain, UINT64_MAX, imgAvailible[currentFrame], NULL, &imgId);
         if (result){
             fprintf(stderr, "[Error] vkAcquireNextImageKHR\n");
             exitCode = 6;
@@ -720,17 +734,17 @@ int main(void){
     }
     vkDeviceWaitIdle(ld->dev);
 
-    for (uint32_t i = 0; i < scImgc; i++)
+    for (uint32_t i = 0; i < ld->scImgc; i++)
         vkDestroyFramebuffer(ld->dev, FrameBuffer[i], NULL);
     vkDestroyPipeline(ld->dev, pipeline, NULL);
     vkDestroyPipelineLayout(ld->dev, pipelineLayout, NULL);
-    vkDestroyRenderPass(ld->dev, RenderPass, NULL);
+    vkDestroyRenderPass(ld->dev, ld->RenderPass, NULL);
 
-    for (uint32_t i = 0; i < scImgc; i++)
-        vkDestroyImageView(ld->dev, imgViews[i], NULL);
-    vkDestroySwapchainKHR(ld->dev,sChain, NULL);
+    for (uint32_t i = 0; i < ld->scImgc; i++)
+        vkDestroyImageView(ld->dev, ld->imgViews[i], NULL);
+    vkDestroySwapchainKHR(ld->dev, ld->swapchain, NULL);
 
-    free(FrameBuffer); free(imgViews);
+    free(FrameBuffer); free(ld->imgViews);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         vkDestroySemaphore(ld->dev, renderFinished[i], NULL);
