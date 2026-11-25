@@ -32,6 +32,27 @@ typedef struct AnsConfig{
     VkPresentModeKHR Vsync;
 } AnsConfig;
 
+#ifdef DEBUG
+static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    VkDebugUtilsMessageTypeFlagsEXT messageType,
+    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
+    fprintf(stderr, "validation layer: %s\n", pCallbackData->pMessage);
+    return VK_FALSE;
+}
+VkDebugUtilsMessengerEXT debugMessenger;
+
+const char** ansGetRequiredInstanceExtensions(uint32_t* countExt){
+    const char** winExt = glfwGetRequiredInstanceExtensions(countExt);
+    const char** InstanceExtns = malloc(*countExt * 8 + 8);
+    for (uint32_t i = 0; i < *countExt; i++)
+        InstanceExtns[i] = winExt[i];
+    InstanceExtns[*countExt] = "VK_EXT_debug_utils";
+    *countExt += 1;
+    return InstanceExtns;
+}
+#endif
+
 int AnsMkWinInstSurf(LibsData *ld, AnsConfig *ansCfg){
     int exitCode = glfwInit();
     if (!exitCode){
@@ -42,8 +63,14 @@ int AnsMkWinInstSurf(LibsData *ld, AnsConfig *ansCfg){
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     ld->win = glfwCreateWindow(ansCfg->WinWidth, ansCfg->WinHeight, "AnySpace Engine Demo", NULL, NULL);
 
-    uint32_t countExt;
-    const char** VkExtns = glfwGetRequiredInstanceExtensions(&countExt);
+    uint32_t countExt; const char** InstanceExtns = 
+    #ifdef DEBUG
+        ansGetRequiredInstanceExtensions(&countExt);
+    #else
+        glfwGetRequiredInstanceExtensions(&countExt);
+    #endif
+    //for (uint32_t i = 0; i < countExt; i++)
+        //puts(InstanceExtns[i]);
 
     VkResult result;
     VkApplicationInfo appInfo = {0};
@@ -58,12 +85,45 @@ int AnsMkWinInstSurf(LibsData *ld, AnsConfig *ansCfg){
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         createInfo.pApplicationInfo = &appInfo;
         createInfo.enabledExtensionCount = countExt;
-        createInfo.ppEnabledExtensionNames = VkExtns;
+        createInfo.ppEnabledExtensionNames = InstanceExtns;
 
+    #ifdef DEBUG
+        createInfo.enabledLayerCount = 1;
+        const char* layers[] = {"VK_LAYER_KHRONOS_validation"};
+        createInfo.ppEnabledLayerNames = layers;
+    
+        VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = {0};
+            debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+            debugCreateInfo.messageSeverity =
+                //VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+            debugCreateInfo.messageType =
+                VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        debugCreateInfo.pfnUserCallback = debugCallback;
+        createInfo.pNext = &debugCreateInfo;
+    #endif
     result = vkCreateInstance(&createInfo, NULL, &ld->instance);
     if (result){
         fputs("[Error] CreateInstance\n", stderr);
-        return 20; }
+        return 20;
+    }
+    #ifdef DEBUG
+        PFN_vkCreateDebugUtilsMessengerEXT CreateDebugUtilsMessengerEXT =
+            (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            ld->instance, "vkCreateDebugUtilsMessengerEXT");
+        if (!CreateDebugUtilsMessengerEXT) {
+            fputs("[Error] Not loaded: vkCreateDebugUtilsMessengerEXT\n", stderr);
+            return VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
+        result = CreateDebugUtilsMessengerEXT(ld->instance, &debugCreateInfo, NULL, &debugMessenger);
+        if (result){
+            fputs("[Error] CreateDebugUtilsMessengerEXT\n", stderr);
+            return 13;}
+        free(InstanceExtns);
+    #endif
 
     result = glfwCreateWindowSurface(ld->instance, ld->win, NULL, &ld->surface);
     if (result){
@@ -273,7 +333,6 @@ int ansMkSwapChain(LibsData *ld, VkPresentModeKHR vsync){
     sCap.currentExtent.width, sCap.currentExtent.height,
     sCap.supportedUsageFlags, sChainInfo.presentMode,
     sChainInfo.imageFormat, sChainInfo.imageColorSpace);*/
-    
     
     result = vkCreateSwapchainKHR(ld->dev, &sChainInfo, NULL, &ld->swapchain);
     if (result){
@@ -705,6 +764,13 @@ void ansClean(LibsData *ld){
     vkDestroyCommandPool(ld->dev, ld->CommandPool, NULL);
     vkDestroyDevice(ld->dev, NULL);
     vkDestroySurfaceKHR(ld->instance, ld->surface, NULL);
+    #ifdef DEBUG
+    PFN_vkDestroyDebugUtilsMessengerEXT pfnDestroyDebugUtilsMessengerEXT =
+    (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+        ld->instance, "vkDestroyDebugUtilsMessengerEXT");
+    if (pfnDestroyDebugUtilsMessengerEXT)
+        pfnDestroyDebugUtilsMessengerEXT(ld->instance, debugMessenger, NULL);
+    #endif
     vkDestroyInstance(ld->instance, NULL);
     glfwDestroyWindow(ld->win);
     glfwTerminate();

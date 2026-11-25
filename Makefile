@@ -2,6 +2,11 @@ cc = clang
 lflags = -lglfw -lvulkan
 cflags = -O2
 dflags = -DMULTI_GPU
+mode ?= 0
+
+ifeq ($(mode),1)
+    dflags += -DDEBUG
+endif
 
 build/anyspace: src/main.c build/frag.spv build/vert.spv
 	$(cc) src/main.c -o build/anyspace $(lflags) $(cflags) $(dflags)
