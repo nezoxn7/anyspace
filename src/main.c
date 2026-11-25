@@ -633,7 +633,7 @@ int ansMkCommand(LibsData *ld){
 int ansRunCycle(LibsData *ld){
     VkResult result; int exitCode = 0;
     uint32_t currentFrame = 0; uint32_t imgId;
-    VkClearValue clearValue = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    VkClearValue clearValue = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
     VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
 
     VkSubmitInfo submitInfo = {0};
@@ -825,7 +825,6 @@ AnsConfig ansGetConfig(char* filename){
 }
 
 int main(void){
-    VkResult result; // temp
     LibsData *ld = malloc(sizeof(LibsData));
     AnsConfig ansCfg = ansGetConfig("config.cfg");
     

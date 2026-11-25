@@ -5,7 +5,7 @@ dflags = -DMULTI_GPU
 mode ?= 0
 
 ifeq ($(mode),1)
-    dflags += -DDEBUG
+    dflags += -DDEBUG -Wall
 endif
 
 build/anyspace: src/main.c build/frag.spv build/vert.spv
