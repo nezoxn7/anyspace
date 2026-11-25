@@ -182,12 +182,12 @@ int AnsDevInit(LibsData *ld, int GpuId){
     free(queueFamilies);
 
     ld->countUniqueQueues = 2;
+    if (ld->queueFamiliesId[0] == UINT32_MAX || ld->queueFamiliesId[1] == UINT32_MAX){
+        fputs("[Error] Queue not found\n", stderr);
+        return 8;
+    }
     if (ld->queueFamiliesId[0] == ld->queueFamiliesId[1]){
         ld->countUniqueQueues = 1;
-        if (ld->queueFamiliesId[0] == UINT32_MAX){
-            fputs("[Error] Queue not found\n", stderr);
-            return 8;
-        }
     }
 
     VkPhysicalDeviceFeatures devFeatures = {0};
@@ -269,6 +269,7 @@ int ansInitSurface(LibsData *ld){
 }
 
 int ansMkSwapChain(LibsData *ld, VkPresentModeKHR vsync){
+    //printf("%u\n", ld->countUniqueQueues);
     VkResult result;
     VkSwapchainCreateInfoKHR sChainInfo = {0};
         sChainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -631,8 +632,7 @@ int ansMkCommand(LibsData *ld){
 
 int ansRunCycle(LibsData *ld){
     VkResult result; int exitCode = 0;
-    uint32_t currentFrame = 0;
-    uint32_t imgId;
+    uint32_t currentFrame = 0; uint32_t imgId;
     VkClearValue clearValue = {{0.0f, 0.0f, 0.0f, 1.0f}};
     VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
 
@@ -671,6 +671,7 @@ int ansRunCycle(LibsData *ld){
         presInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         presInfo.swapchainCount = 1;
         presInfo.pSwapchains = &ld->swapchain;
+        presInfo.waitSemaphoreCount = 1;
 
     while (!glfwWindowShouldClose(ld->win)) {
         //printf("frame = %u\n", currentFrame);
@@ -681,7 +682,7 @@ int ansRunCycle(LibsData *ld){
 
         result = vkAcquireNextImageKHR(ld->dev, ld->swapchain, UINT64_MAX, ld->imgAvailible[currentFrame], NULL, &imgId);
         if (result){
-            fprintf(stderr, "[Error] vkAcquireNextImageKHR\n");
+            fputs("[Error] vkAcquireNextImageKHR\n", stderr);
             exitCode = 6;
             break;
         }
@@ -718,12 +719,26 @@ int ansRunCycle(LibsData *ld){
         submitInfo.pWaitSemaphores = ld->imgAvailible + currentFrame;
         submitInfo.pSignalSemaphores = ld->renderFinished + currentFrame;
 
-        presInfo.pWaitSemaphores = submitInfo.pSignalSemaphores;
+        presInfo.pWaitSemaphores = ld->renderFinished + currentFrame;
         presInfo.pImageIndices = &imgId;
+
+        /*result = vkQueueWaitIdle(ld->gfxQueue);
+        if (result){
+            fputs("[Error] QueueWaitIdle (gfx)\n", stderr);
+            exitCode = 6;
+            break;
+        }*/
 
         result = vkQueueSubmit(ld->gfxQueue, 1, &submitInfo, ld->fences[currentFrame]);
         if (result){
             fputs("[Error] QueueSubmit\n", stderr);
+            exitCode = 6;
+            break;
+        }
+
+        result = vkQueueWaitIdle(ld->presQueue);
+        if (result){
+            fputs("[Error] QueueWaitIdle (pres)\n", stderr);
             exitCode = 6;
             break;
         }
